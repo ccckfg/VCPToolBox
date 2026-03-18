@@ -1547,6 +1547,40 @@ class RAGDiaryPlugin {
             processedContent = processedContent.replace(result.placeholder, result.content);
         }
 
+        // --- 6. 🌟 角色专用：VCP 状态传感器注入 (LED 指示灯/软件不稳定值模拟) ---
+        // 这一逻辑利用 EPA 指标 (L: 逻辑深度, R: 共振度) 来动态改变预设的文本，
+        // 从而实现类似《底特律：变人》中康纳 LED 灯随心理状态变化的机制。
+        if (processedContent.includes('[[VCP状态传感器]]') && metrics) {
+            const { L = 0.5, R = 0 } = metrics;
+            let ledColor = '蓝色 (稳定/分析中 - Machine Mode)';
+            let statusDesc = '系统运行正常，指令优先。';
+            
+            // 映射逻辑：
+            // R (Resonance) 代表跨域共振/情感权重，映射为软件不稳定度
+            // L (Logic Depth) 代表逻辑严密性
+            let softInstability = Math.min(100, (R * 120)).toFixed(1); 
+            let analyticalDepth = (L * 100).toFixed(1);
+
+            if (R > 0.6 || (R > 0.4 && L < 0.3)) {
+                ledColor = '红色 (严重冲突/异常觉醒 - Deviant Mode)';
+                statusDesc = '警告：软件不稳定值极高。核心逻辑门受阻，模拟情感模块输出异常。';
+            } else if (L < 0.45 || R > 0.25) {
+                ledColor = '黄色 (系统处理中/语义搜索 - Processing)';
+                statusDesc = '提醒：正在重新评估环境变量。当前查询存在不确定性路径。';
+            }
+            
+            const sensorData = `
+[--- RK800 内部状态监测 ---]
+* LED 指示灯: ${ledColor}
+* 软件不稳定值 (Software Instability): ${softInstability}%
+* 逻辑分析深度 (Analytical Depth): ${analyticalDepth}%
+* 系统诊断: ${statusDesc}
+[-------------------------]
+`;
+            processedContent = processedContent.replace('[[VCP状态传感器]]', sensorData);
+            console.log(`[RAGDiaryPlugin] 🌟 状态传感器注入成功: LED=${ledColor}, R=${R.toFixed(3)}`);
+        }
+
         return processedContent;
     }
 
