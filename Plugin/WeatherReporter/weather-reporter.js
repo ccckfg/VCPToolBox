@@ -90,7 +90,8 @@ async function getCityInfo(cityName, weatherKey, weatherUrl) {
     }
   }
 
-  const lookupUrl = `https://${weatherUrl}/geo/v2/city/lookup?location=${encodeURIComponent(
+  const geoHost = weatherUrl.replace('devapi', 'geoapi').replace(/^api\./, 'geoapi.');
+  const lookupUrl = `https://${geoHost}/geo/v2/city/lookup?location=${encodeURIComponent(
     cityName,
   )}&key=${weatherKey}`;
 

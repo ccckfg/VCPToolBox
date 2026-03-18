@@ -201,3 +201,7 @@ rust-vexus-lite/target/
 
 # ==== 分布式开发 ====
 VCPDistributedServer
+# ==== 本地工具/子项目 ====
+AstrBot/
+uv.lock
+.venv/
