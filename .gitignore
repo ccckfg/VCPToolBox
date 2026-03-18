@@ -205,3 +205,5 @@ VCPDistributedServer
 AstrBot/
 uv.lock
 .venv/
+Plugin/WeatherReporter/output.txt
+Plugin/WeatherReporter/test.js
