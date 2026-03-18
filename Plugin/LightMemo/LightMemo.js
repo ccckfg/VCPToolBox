@@ -157,6 +157,41 @@ class LightMemoPlugin {
             actualQuery = actualQuery.replace('[音乐检索]', '').trim();
         }
 
+        // --- 时间范围约束语法解析 ---
+        let timeRange = null;
+        const timeRangeRegex = /\[\s*(20\d{2}[-./]\d{1,2}(?:[-./]\d{1,2})?)\s*[~到-]\s*(20\d{2}[-./]\d{1,2}(?:[-./]\d{1,2})?)\s*\]/;
+        let timeMatch = actualQuery.match(timeRangeRegex);
+
+        const parseDateToNumber = (dateStr, isEnd) => {
+            const parts = dateStr.split(/[-./]/);
+            const y = parts[0];
+            const m = (parts[1] || (isEnd ? '12' : '01')).padStart(2, '0');
+            const d = (parts[2] || (isEnd ? '31' : '01')).padStart(2, '0');
+            return parseInt(`${y}${m}${d}`, 10);
+        };
+
+        if (timeMatch) {
+            const startNum = parseDateToNumber(timeMatch[1], false);
+            const endNum = parseDateToNumber(timeMatch[2], true);
+            timeRange = { start: startNum, end: endNum };
+            actualQuery = actualQuery.replace(timeMatch[0], '').trim();
+            console.log(`[LightMemo] Parsed time range constraint: ${timeMatch[1]} to ${timeMatch[2]} (${startNum} - ${endNum})`);
+        } else {
+            const singleDateRegex = /\[\s*(20\d{2}[-./]\d{1,2}(?:[-./]\d{1,2})?)\s*\]/;
+            const singleDateMatch = actualQuery.match(singleDateRegex);
+            if (singleDateMatch) {
+                const dateNumStart = parseDateToNumber(singleDateMatch[1], false);
+                const dateNumEnd = parseDateToNumber(singleDateMatch[1], true);
+                timeRange = { start: dateNumStart, end: dateNumEnd };
+                actualQuery = actualQuery.replace(singleDateMatch[0], '').trim();
+                console.log(`[LightMemo] Parsed single date constraint: ${singleDateMatch[1]} (${dateNumStart} - ${dateNumEnd})`);
+            }
+        }
+
+        if (!actualQuery && timeRange) {
+            actualQuery = maid || folder || "记录"; // 如果只有时间约束，给予默认查询词避免向量化报错
+        }
+
         if (!isMusicSearch && (!query || (!maid && !folder))) {
             throw new Error("参数 'query' 是必需的，且必须提供 'maid' 或 'folder'。");
         }
@@ -170,7 +205,8 @@ class LightMemoPlugin {
             maid: effectiveMaid,
             folder: effectiveFolder,
             searchAll: effectiveSearchAll,
-            ignoreExcludedFolders: isMusicSearch
+            ignoreExcludedFolders: isMusicSearch,
+            timeRange: timeRange
         });
 
         if (candidates.length === 0) {
@@ -240,7 +276,7 @@ class LightMemoPlugin {
         // 🚀【新步骤】如果启用了 TagMemo，则调用 KBM 的功能来增强向量
         if (tag_boost > 0 && this.vectorDBManager && typeof this.vectorDBManager.applyTagBoost === 'function') {
             const hasCore = Array.isArray(core_tags) && core_tags.length > 0;
-            console.log(`[LightMemo] Applying TagMemo V3 boost (Factor: ${tag_boost}${hasCore ? `, CoreTags: ${core_tags.length}` : ''})`);
+            console.log(`[LightMemo] Applying TagMemo V6 boost (Factor: ${tag_boost}${hasCore ? `, CoreTags: ${core_tags.length}` : ''})`);
 
             // 即使 core_tags 为空，KBM 内部也会处理好默认逻辑
             const boostResult = this.vectorDBManager.applyTagBoost(
@@ -258,10 +294,10 @@ class LightMemoPlugin {
                     const matched = tagBoostInfo.matchedTags || [];
                     const coreMatched = tagBoostInfo.coreTagsMatched || [];
                     if (coreMatched.length > 0) {
-                        console.log(`[LightMemo] TagMemo V3 Spotlight: [${coreMatched.join(', ')}]`);
+                        console.log(`[LightMemo] TagMemo V6 Spotlight: [${coreMatched.join(', ')}]`);
                     }
                     if (matched.length > 0) {
-                        console.log(`[LightMemo] TagMemo V3 Matched: [${matched.slice(0, 5).join(', ')}]`);
+                        console.log(`[LightMemo] TagMemo V6 Matched: [${matched.slice(0, 5).join(', ')}]`);
                     }
                 }
             }
@@ -302,8 +338,21 @@ class LightMemoPlugin {
         let finalResults = hybridScored.slice(0, k);
 
         // --- 第三阶段：Rerank（可选） ---
-        if (rerank && finalResults.length > 0) {
-            finalResults = await this._rerankDocuments(actualQuery, finalResults, k);
+        // 🌟 Rerank+ (RRF): rerank 参数支持 true/false/"rrf"/"rrf0.7" 四种形式
+        // "rrf" = RRF融合(α=0.5), "rrf0.7" = RRF融合(α=0.7, Reranker占70%权重)
+        const useRerank = rerank === true || (typeof rerank === 'string' && rerank.toLowerCase().startsWith('rrf'));
+        let rrfOptions = null;
+        if (typeof rerank === 'string' && rerank.toLowerCase().startsWith('rrf')) {
+            const alphaMatch = rerank.match(/rrf(\d+\.?\d*)/i);
+            const alpha = alphaMatch ? Math.min(1.0, Math.max(0.0, parseFloat(alphaMatch[1]))) : 0.5;
+            rrfOptions = { alpha };
+            console.log(`[LightMemo] 🌟 Rerank+ (RRF) 模式启用: α=${alpha}`);
+        }
+
+        if (useRerank && finalResults.length > 0) {
+            // 🌟 Rerank+: 注入检索排位 (retrieval_rank) 用于 RRF 融合
+            finalResults.forEach((doc, idx) => { doc.retrieval_rank = idx + 1; });
+            finalResults = await this._rerankDocuments(actualQuery, finalResults, k, rrfOptions);
         }
 
         return this.formatResults(finalResults, query);
@@ -378,7 +427,7 @@ class LightMemoPlugin {
         return Math.ceil(chineseChars * 1.5 + otherChars * 0.25);
     }
 
-    async _rerankDocuments(query, documents, originalK) {
+    async _rerankDocuments(query, documents, originalK, rrfOptions = null) {
         if (!this.rerankConfig.url || !this.rerankConfig.apiKey || !this.rerankConfig.model) {
             console.warn('[LightMemo] Rerank not configured. Skipping.');
             return documents.slice(0, originalK);
@@ -480,18 +529,48 @@ class LightMemoPlugin {
             }
         }
 
-        // 👇 修复：安全排序
-        allRerankedDocs.sort((a, b) => {
-            const scoreA = a.rerank_score ?? 0;
-            const scoreB = b.rerank_score ?? 0;
-            return scoreB - scoreA;
-        });
+        // 🌟 Rerank+ (RRF Fusion) 或标准 Rerank 排序
+        if (rrfOptions) {
+            // --- Reciprocal Rank Fusion (RRF) ---
+            const RRF_K = 60;
+            const alpha = rrfOptions.alpha ?? 0.5;
 
-        const finalDocs = allRerankedDocs.slice(0, originalK);
-        console.log(`[LightMemo] Rerank complete. Final scores:`,
-            finalDocs.map(d => (d.rerank_score || 0).toFixed(3)).join(', '));
+            // Step 1: 按 rerank_score 降序排列，赋予 rerank_rank (1-based)
+            allRerankedDocs.sort((a, b) => (b.rerank_score ?? -1) - (a.rerank_score ?? -1));
+            allRerankedDocs.forEach((doc, idx) => { doc.rerank_rank = idx + 1; });
 
-        return finalDocs;
+            // Step 2: 计算 RRF 融合分数
+            allRerankedDocs.forEach(doc => {
+                const retrievalRank = doc.retrieval_rank || allRerankedDocs.length;
+                const rerankRank = doc.rerank_rank;
+                doc.rrf_score = alpha * (1 / (RRF_K + rerankRank))
+                              + (1 - alpha) * (1 / (RRF_K + retrievalRank));
+            });
+
+            // Step 3: 按 RRF 融合分数降序排列
+            allRerankedDocs.sort((a, b) => b.rrf_score - a.rrf_score);
+
+            const finalDocs = allRerankedDocs.slice(0, originalK);
+            console.log(`[LightMemo] 🌟 Rerank+ (RRF) 完成: ${finalDocs.length}篇文档 (α=${alpha})`);
+            finalDocs.forEach((doc, idx) => {
+                console.log(`  [RRF #${idx + 1}] rrf=${doc.rrf_score?.toFixed(6)} | retrieval_rank=${doc.retrieval_rank} | rerank_rank=${doc.rerank_rank} | rerank_score=${doc.rerank_score?.toFixed(4) ?? 'N/A'} | hybrid_score=${doc.hybridScore?.toFixed(4) ?? 'N/A'}`);
+            });
+
+            return finalDocs;
+        } else {
+            // --- 标准 Rerank 排序（原有逻辑，不变） ---
+            allRerankedDocs.sort((a, b) => {
+                const scoreA = a.rerank_score ?? 0;
+                const scoreB = b.rerank_score ?? 0;
+                return scoreB - scoreA;
+            });
+
+            const finalDocs = allRerankedDocs.slice(0, originalK);
+            console.log(`[LightMemo] Rerank complete. Final scores:`,
+                finalDocs.map(d => (d.rerank_score || 0).toFixed(3)).join(', '));
+
+            return finalDocs;
+        }
     }
 
     /**
@@ -522,7 +601,7 @@ class LightMemoPlugin {
      * 从所有相关日记本中收集chunks（带署名过滤）
      * 适配 KnowledgeBaseManager (SQLite)
      */
-    async _gatherCandidateChunks({ maid, folder, searchAll, ignoreExcludedFolders = false }) {
+    async _gatherCandidateChunks({ maid, folder, searchAll, ignoreExcludedFolders = false, timeRange = null }) {
         const db = this.vectorDBManager.db;
         if (!db) {
             console.error('[LightMemo] Database not initialized in KnowledgeBaseManager.');
@@ -570,6 +649,24 @@ class LightMemoPlugin {
             // 流式遍历过滤后的 chunks
             for (const row of stmt.iterate(...params)) {
                 const text = row.content || '';
+
+                // --- 2.5 时间范围过滤 ---
+                if (timeRange) {
+                    const header = text.substring(0, 100);
+                    const chunkTimeMatch = header.match(/\[?(20\d{2}[-./]\d{1,2}(?:[-./]\d{1,2})?)\]?/);
+                    if (!chunkTimeMatch) {
+                        continue; // 无时间戳，被时间约束丢弃
+                    }
+                    const parts = chunkTimeMatch[1].split(/[-./]/);
+                    const y = parts[0];
+                    const m = (parts[1] || '01').padStart(2, '0');
+                    const d = (parts[2] || '01').padStart(2, '0');
+                    const chunkDateNum = parseInt(`${y}${m}${d}`, 10);
+
+                    if (chunkDateNum < timeRange.start || chunkDateNum > timeRange.end) {
+                        continue;
+                    }
+                }
 
                 // 3. 署名过滤 (如果不是搜索全部且没有指定文件夹)
                 if (!searchAll && targetFolders.length === 0 && maid) {

@@ -4,11 +4,32 @@ const path = require('path');
 const lunarCalendar = require('chinese-lunar-calendar');
 const agentManager = require('./agentManager.js'); // 引入新的Agent管理器
 const tvsManager = require('./tvsManager.js'); // 引入新的TVS管理器
+const toolboxManager = require('./toolboxManager.js');
 
 const DEFAULT_TIMEZONE = process.env.DEFAULT_TIMEZONE || 'Asia/Shanghai';
 const REPORT_TIMEZONE = process.env.REPORT_TIMEZONE || 'Asia/Shanghai'; // 新增：用于控制 AI 报告的时间，默认回退到中国时区
-const AGENT_DIR = path.join(__dirname, '..', 'Agent');
-const TVS_DIR = path.join(__dirname, '..', 'TVStxt');
+function resolveAgentDir() {
+    const configPath = process.env.AGENT_DIR_PATH;
+    if (!configPath || typeof configPath !== 'string' || configPath.trim() === '') {
+        return path.join(__dirname, '..', 'Agent');
+    }
+    const normalizedPath = path.normalize(configPath.trim());
+    return path.isAbsolute(normalizedPath)
+        ? normalizedPath
+        : path.resolve(__dirname, '..', normalizedPath);
+}
+const AGENT_DIR = resolveAgentDir();
+function resolveTvsDir() {
+    const configPath = process.env.TVSTXT_DIR_PATH;
+    if (!configPath || typeof configPath !== 'string' || configPath.trim() === '') {
+        return path.join(__dirname, '..', 'TVStxt');
+    }
+    const normalizedPath = path.normalize(configPath.trim());
+    return path.isAbsolute(normalizedPath)
+        ? normalizedPath
+        : path.resolve(__dirname, '..', normalizedPath);
+}
+const TVS_DIR = resolveTvsDir();
 const VCP_ASYNC_RESULTS_DIR = path.join(__dirname, '..', 'VCPAsyncResults');
 
 async function resolveAllVariables(text, model, role, context, processingStack = new Set()) {
@@ -16,11 +37,14 @@ async function resolveAllVariables(text, model, role, context, processingStack =
     let processedText = String(text);
 
     // 通用正则表达式，匹配所有 {{...}} 格式的占位符
-    const placeholderRegex = /\{\{([a-zA-Z0-9_:]+)\}\}/g;
+    // CJK Radicals Supplement - Ideographic Description Characters 0x2E80 - 0x2FFF
+    // Hiragana - CJK Unified Ideographs 0x3040 - 0x9FFF
+    // 跳过标点符号 CJK Symbols and Punctuation 0x3000 - 0x303F
+    const placeholderRegex = /\{\{([a-zA-Z0-9_:\u2e80-\u2fff\u3040-\u9fff]+)\}\}/g;
     const matches = [...processedText.matchAll(placeholderRegex)];
 
-    // 提取所有潜在的别名（去除 "agent:" 前缀）
-    const allAliases = new Set(matches.map(match => match[1].replace(/^agent:/, '')));
+    // 提取所有潜在的别名（去除 "agent:" / "toolbox:" 前缀）
+    const allAliases = new Set(matches.map(match => match[1].replace(/^(agent:|toolbox:)/, '')));
 
     for (const alias of allAliases) {
         // 关键：使用 agentManager 来判断这是否是一个真正的Agent
@@ -44,7 +68,34 @@ async function resolveAllVariables(text, model, role, context, processingStack =
         }
     }
 
-    // 在所有Agent都被递归展开后，处理剩余的非Agent占位符
+    // 在所有Agent都被递归展开后，处理 toolbox 占位符
+    for (const alias of allAliases) {
+        if (toolboxManager.isToolbox(alias)) {
+            const stackKey = `toolbox:${alias}`;
+            if (processingStack.has(stackKey)) {
+                const errorMessage = `[Error: Circular toolbox reference detected for '${alias}']`;
+                processedText = processedText
+                    .replaceAll(`{{${alias}}}`, errorMessage)
+                    .replaceAll(`{{toolbox:${alias}}}`, errorMessage);
+                continue;
+            }
+
+            processingStack.add(stackKey);
+            const foldObj = await toolboxManager.getFoldObject(alias);
+            const expandedText = await resolveDynamicFoldProtocol(
+                foldObj,
+                context,
+                `{{${alias}}}`
+            );
+            processingStack.delete(stackKey);
+
+            processedText = processedText
+                .replaceAll(`{{${alias}}}`, expandedText)
+                .replaceAll(`{{toolbox:${alias}}}`, expandedText);
+        }
+    }
+
+    // 处理剩余的非Agent占位符
     processedText = await replacePriorityVariables(processedText, context, role);
     processedText = await replaceOtherVariables(processedText, model, role, context);
 
@@ -103,35 +154,49 @@ async function resolveDynamicFoldProtocol(foldObj, context, placeholderKey) {
             return fallbackBlock.content;
         }
 
-        // 调用 RAGDiaryPlugin 的清理方法，确保文本与 RAG 插件完全一致 (命中缓存的关键)
-        if (typeof ragPlugin._stripSystemNotification === 'function') {
+        // 调用 RAGDiaryPlugin 的统一净化方法，确保文本与 RAG 插件完全一致 (命中缓存的关键)
+        if (typeof ragPlugin.sanitizeForEmbedding === 'function') {
             if (userContent) {
                 const originalUserContent = userContent;
-                userContent = ragPlugin._stripSystemNotification(userContent);
-                userContent = ragPlugin._stripHtml(userContent);
-                userContent = ragPlugin._stripEmoji(userContent);
-                userContent = ragPlugin._stripToolMarkers(userContent);
+                userContent = ragPlugin.sanitizeForEmbedding(userContent, 'user');
                 if (context.DEBUG_MODE && originalUserContent.length !== userContent.length) {
-                    console.log('[DynamicFold] User content was sanitized (SystemNotification + HTML + Emoji removed).');
+                    console.log('[DynamicFold] User content was sanitized via unified sanitizer.');
                 }
             }
-        }
-        if (aiContent && typeof ragPlugin._stripHtml === 'function') {
-            const originalAiContent = aiContent;
-            aiContent = ragPlugin._stripHtml(aiContent);
-            aiContent = ragPlugin._stripEmoji(aiContent);
-            aiContent = ragPlugin._stripToolMarkers(aiContent);
-            if (context.DEBUG_MODE && originalAiContent.length !== aiContent.length) {
-                console.log('[DynamicFold] AI content was sanitized (HTML + Emoji removed).');
+            if (aiContent) {
+                const originalAiContent = aiContent;
+                aiContent = ragPlugin.sanitizeForEmbedding(aiContent, 'assistant');
+                if (context.DEBUG_MODE && originalAiContent.length !== aiContent.length) {
+                    console.log('[DynamicFold] AI content was sanitized via unified sanitizer.');
+                }
+            }
+        } else {
+            // 后备逻辑：如果插件版本较旧，尝试使用旧的私有方法
+            if (typeof ragPlugin._stripSystemNotification === 'function') {
+                if (userContent) {
+                    userContent = ragPlugin._stripSystemNotification(userContent);
+                    userContent = ragPlugin._stripHtml(userContent);
+                    userContent = ragPlugin._stripEmoji(userContent);
+                    userContent = ragPlugin._stripToolMarkers(userContent);
+                }
+            }
+            if (aiContent && typeof ragPlugin._stripHtml === 'function') {
+                aiContent = ragPlugin._stripHtml(aiContent);
+                aiContent = ragPlugin._stripEmoji(aiContent);
+                aiContent = ragPlugin._stripToolMarkers(aiContent);
             }
         }
 
-        const combinedQueryForDisplay = aiContent
-            ? `[AI]: ${aiContent}\n[User]: ${userContent}`
-            : userContent;
+        // 🌟 对齐 RAGDiaryPlugin 的加权平均逻辑以命中缓存
+        const config = ragPlugin.ragParams?.RAGDiaryPlugin || {};
+        const mainWeights = config.mainSearchWeights || [0.7, 0.3];
 
-        // 获取当前会话上下文向量 (此时将完美命中 RAGDiaryPlugin 的 embeddingCache)
-        const userVector = await ragPlugin.getSingleEmbeddingCached(combinedQueryForDisplay);
+        const [uVec, aVec] = await Promise.all([
+            userContent ? ragPlugin.getSingleEmbeddingCached(userContent) : Promise.resolve(null),
+            aiContent ? ragPlugin.getSingleEmbeddingCached(aiContent) : Promise.resolve(null)
+        ]);
+
+        const userVector = ragPlugin._getWeightedAverageVector([uVec, aVec], mainWeights);
         if (!userVector) {
             if (context.DEBUG_MODE) console.log(`[DynamicFold] 获取用户上下文向量失败，返回基础内容 (${placeholderKey})`);
             return fallbackBlock.content;
