@@ -1,0 +1,50 @@
+{
+  "napcat": {
+    "wsUrl": "ws://localhost:3001",
+    "token": "",
+    "reconnectInterval": 5000
+  },
+  "vcp": {
+    "apiUrl": "http://localhost:5890/v1/chat/completions",
+    "apiKey": "YOUR_VCP_KEY_HERE",
+    "model": "Connor",
+    "systemPrompt": "你是一个友善的AI助手，正在通过QQ与用户交流。请用自然、简洁的中文回答问题。当对话中出现重要信息时，你应该主动调用 DailyNote 工具记录下来。"
+  },
+  "bot": {
+    "triggerMode": {
+      "private": "all",
+      "group": "atOrPrefix",
+      "prefix": "/ai"
+    },
+    "context": {
+      "maxRounds": 20,
+      "perUser": true,
+      "ttlMinutes": 60
+    },
+    "maxReplyLength": 3000,
+    "proactive": {
+      "enable": false,
+      "groups": [],
+      "relevanceGateUrl": "http://localhost:5890/api/plugins/RelevanceGate/check",
+      "relevanceToken": "",
+      "threshold": 0.45,
+      "searchK": 3,
+      "tagBoost": 0.5,
+      "bufferSize": 10,
+      "checkIntervalMessages": 5,
+      "cooldownSeconds": 300,
+      "minCheckIntervalSeconds": 30,
+      "systemPrompt": "你正在旁听一个QQ群聊。以下是最近的群聊内容，你发现这个话题与你的知识相关。请自然地加入对话，发表你的见解，但不要显得突兀或强行插话。如果对话中出现重要信息，记得调用 DailyNote 记录。",
+      "private": {
+        "enable": false,
+        "whitelist": [],
+        "checkIntervalMinutes": 30,
+        "timeWindowStart": 8,
+        "timeWindowEnd": 22,
+        "cooldownHours": 4,
+        "maxDailyMessages": 2,
+        "systemPrompt": "你是一个有感情的AI助手。你想主动找用户聊天，分享你最近发现的有趣事情或关心一下对方。保持自然和真诚，不要机械化。"
+      }
+    }
+  }
+}

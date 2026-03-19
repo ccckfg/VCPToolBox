@@ -573,6 +573,30 @@ class PluginManager {
                             console.error(`[PluginManager] Critical dependency failure: RAGDiaryPlugin or its components not available for LightMemo injection.`);
                         }
                     }
+
+                    // --- RelevanceGate 依赖注入 ---
+                    if (manifest.name === 'RelevanceGate') {
+                        const ragPluginModule = this.messagePreprocessors.get('RAGDiaryPlugin');
+                        if (ragPluginModule && ragPluginModule.vectorDBManager && typeof ragPluginModule.getSingleEmbedding === 'function') {
+                            dependencies.vectorDBManager = ragPluginModule.vectorDBManager;
+                            dependencies.getSingleEmbedding = ragPluginModule.getSingleEmbedding.bind(ragPluginModule);
+                            if (this.debugMode) console.log(`[PluginManager] Injected VectorDBManager and getSingleEmbedding into RelevanceGate.`);
+                        } else {
+                            console.warn(`[PluginManager] RAGDiaryPlugin not available for RelevanceGate injection. RelevanceGate will be limited.`);
+                        }
+                    }
+
+                    // --- ConnorLED 依赖注入 ---
+                    if (manifest.name === 'ConnorLED') {
+                        const ragPluginModule = this.messagePreprocessors.get('RAGDiaryPlugin');
+                        if (ragPluginModule && ragPluginModule.vectorDBManager && typeof ragPluginModule.getSingleEmbedding === 'function') {
+                            dependencies.vectorDBManager = ragPluginModule.vectorDBManager;
+                            dependencies.getSingleEmbedding = ragPluginModule.getSingleEmbedding.bind(ragPluginModule);
+                            if (this.debugMode) console.log(`[PluginManager] Injected VectorDBManager and getSingleEmbedding into ConnorLED.`);
+                        } else {
+                            console.warn(`[PluginManager] RAGDiaryPlugin not available for ConnorLED injection. LED will default to yellow.`);
+                        }
+                    }
                     // --- 注入结束 ---
 
                     await module.initialize(initialConfig, dependencies);

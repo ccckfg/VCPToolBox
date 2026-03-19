@@ -1,0 +1,12 @@
+{
+  "name": "napcat-vcp-bridge",
+  "version": "1.0.0",
+  "description": "NapCat ↔ VCPToolBox 桥接服务，让 QQ 用户与 VCP AI 对话",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

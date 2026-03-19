@@ -1,0 +1,18 @@
+{
+  "manifestVersion": "1.0.0",
+  "name": "ConnorLED",
+  "version": "1.0.0",
+  "displayName": "Connor LED 状态系统",
+  "description": "利用 TagMemo 向量搜索算法计算用户消息与 Connor 记忆的匹配度，实时驱动 LED 三色状态指示器。通过 {{VCPConnorLED}} 占位符注入到系统提示词。",
+  "author": "VCPToolBox",
+  "pluginType": "messagePreprocessor",
+  "entryPoint": {
+    "script": "ConnorLED.js"
+  },
+  "communication": {
+    "protocol": "direct"
+  },
+  "systemPromptPlaceholders": {
+    "VCPConnorLED": "Connor LED 状态（由 TagMemo 算法实时计算）"
+  }
+}

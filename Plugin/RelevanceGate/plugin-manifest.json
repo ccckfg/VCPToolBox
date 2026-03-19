@@ -1,0 +1,26 @@
+{
+  "manifestVersion": "1.0.0",
+  "name": "RelevanceGate",
+  "version": "1.0.0",
+  "displayName": "相关度网关 (RelevanceGate)",
+  "description": "暴露一个轻量级 HTTP 端点，利用 VCP 的 TagMemo/RAG 向量系统判断输入文本与知识库的相关程度。供外部服务（如 QQ Bridge）做主动发言判定。",
+  "author": "VCP",
+  "pluginType": "service",
+  "hasApiRoutes": true,
+  "entryPoint": {
+    "script": "RelevanceGate.js"
+  },
+  "communication": {
+    "protocol": "direct"
+  },
+  "configSchema": {
+    "RELEVANCE_TOKEN": {
+      "type": "string",
+      "description": "访问 RelevanceGate API 的认证令牌。留空则不需要认证。",
+      "default": ""
+    }
+  },
+  "capabilities": {
+    "invocationCommands": []
+  }
+}
