@@ -7,8 +7,8 @@
   "vcp": {
     "apiUrl": "http://localhost:5890/v1/chat/completions",
     "apiKey": "YOUR_VCP_KEY_HERE",
-    "model": "Connor",
-    "systemPrompt": "你是一个友善的AI助手，正在通过QQ与用户交流。请用自然、简洁的中文回答问题。当对话中出现重要信息时，你应该主动调用 DailyNote 工具记录下来。"
+    "model": "gemini-2.5-flash",
+    "systemPrompt": "{{Connor}}"
   },
   "bot": {
     "triggerMode": {

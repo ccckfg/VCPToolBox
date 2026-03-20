@@ -546,17 +546,16 @@ class PrivateProactiveScheduler {
                 ];
 
                 try {
-                    const reply = await callVCP(messages);
-                    const segments = sanitizeReply(reply);
-
-                    for (let i = 0; i < segments.length; i++) {
-                        const truncated = truncateReply(segments[i]);
-                        if (i > 0) await sleep(500);
+                    let segIdx = 0;
+                    await callVCPStreaming(messages, async (segment) => {
+                        const truncated = truncateReply(segment);
+                        if (segIdx > 0) await sleep(500);
                         await callOneBot('send_private_msg', {
                             user_id: Number(userId),
                             message: [{ type: 'text', data: { text: truncated } }]
                         });
-                    }
+                        segIdx++;
+                    });
 
                     affinityManager.markProactive(userId);
                     log('INFO', `[主动私聊] ✅ 已主动发消息给 ${user.nickname || userId}（亲和度: ${user.affinity.toFixed(1)}）`);
@@ -615,7 +614,7 @@ function httpRequest(url, method, headers, body) {
 }
 
 /**
- * 调用 VCP 的 /v1/chat/completions 接口
+ * 调用 VCP 的 /v1/chat/completions 接口（非流式，保留用于不需要分段的场景）
  */
 async function callVCP(messages) {
     const body = JSON.stringify({
@@ -640,6 +639,211 @@ async function callVCP(messages) {
         throw new Error('VCP 响应格式异常：无 choices[0].message.content');
     }
     return reply;
+}
+
+/**
+ * 清理单个文字段（移除残留标记、内部分隔符、合并空行）
+ */
+function sanitizeSegment(text) {
+    if (!text) return '';
+    let seg = text;
+    // 清理残留的不完整工具调用标记
+    seg = seg.replace(/<<<\[(?:TOOL_REQUEST|END_TOOL_REQUEST)\]>>>/g, '');
+    // 清理 VCP 内部分隔符标记
+    seg = seg.replace(/「始」.*?「末」/g, '');
+    // 合并多余空行
+    seg = seg.replace(/\n{3,}/g, '\n\n');
+    // 去掉首尾空白
+    seg = seg.trim();
+    return seg;
+}
+
+/**
+ * 流式调用 VCP 的 /v1/chat/completions 接口
+ * 实时解析 SSE 流，遇到工具调用分隔时立即通过 onSegment 回调发送已累积文字
+ *
+ * @param {Array} messages - 消息数组
+ * @param {(segment: string) => Promise<void>} onSegment - 当一段可发送文字就绪时的回调
+ * @returns {Promise<string>} 完整的原始回复文本（含工具调用块），用于写入上下文
+ */
+function callVCPStreaming(messages, onSegment) {
+    return new Promise((resolve, reject) => {
+        const urlObj = new URL(vcpConfig.apiUrl);
+        const isHttps = urlObj.protocol === 'https:';
+        const httpModule = isHttps ? https : http;
+
+        const body = JSON.stringify({
+            model: vcpConfig.model,
+            messages,
+            stream: true
+        });
+
+        const options = {
+            hostname: urlObj.hostname,
+            port: urlObj.port || (isHttps ? 443 : 80),
+            path: urlObj.pathname + urlObj.search,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${vcpConfig.apiKey}`,
+                'Accept': 'text/event-stream',
+                'Content-Length': Buffer.byteLength(body)
+            }
+        };
+
+        const req = httpModule.request(options, (res) => {
+            if (res.statusCode !== 200) {
+                let errBody = '';
+                res.on('data', chunk => errBody += chunk);
+                res.on('end', () => reject(new Error(`VCP 返回 HTTP ${res.statusCode}: ${errBody.substring(0, 500)}`)));
+                return;
+            }
+
+            let sseBuffer = '';       // SSE 行缓冲
+            let fullContent = '';     // 完整回复（含工具块），用于上下文
+            let pendingText = '';     // 当前待发送的纯文字累积
+            let insideToolBlock = false;  // 是否在工具调用块内
+
+            // 工具调用标记
+            const TOOL_START = '<<<[TOOL_REQUEST]>>>';
+            const TOOL_END = '<<<[END_TOOL_REQUEST]>>>';
+
+            // 待完成的 segment 发送队列（串行化）
+            let sendQueue = Promise.resolve();
+
+            function flushSegment() {
+                const seg = sanitizeSegment(pendingText);
+                pendingText = '';
+                if (seg.length > 0 && onSegment) {
+                    // 将发送操作加入队列，保证顺序
+                    sendQueue = sendQueue.then(() => onSegment(seg)).catch(err => {
+                        log('ERROR', '[VCPStreaming] onSegment 回调失败:', err.message);
+                    });
+                }
+            }
+
+            function processContent(delta) {
+                if (!delta) return;
+                fullContent += delta;
+
+                // 逐字符处理，使用状态机检测标记
+                pendingText += delta;
+
+                // 循环检测标记（一个 delta 中可能包含多个标记）
+                while (true) {
+                    if (!insideToolBlock) {
+                        // 寻找 TOOL_START
+                        const startIdx = pendingText.indexOf(TOOL_START);
+                        if (startIdx !== -1) {
+                            // 工具调用开始：发送标记前的文字
+                            const beforeTool = pendingText.substring(0, startIdx);
+                            pendingText = pendingText.substring(startIdx + TOOL_START.length);
+                            insideToolBlock = true;
+
+                            // 暂存 beforeTool 并 flush
+                            const savedPending = pendingText;
+                            pendingText = beforeTool;
+                            flushSegment();
+                            pendingText = savedPending;
+                            continue; // 继续检查是否还有 END 标记
+                        }
+
+                        // 没有完整的 TOOL_START，但可能正在累积中
+                        // 检查 pendingText 末尾是否可能是标记的前缀
+                        // 保留最后 (TOOL_START.length - 1) 个字符作为缓冲
+                        break;
+                    } else {
+                        // 在工具块内，寻找 TOOL_END
+                        const endIdx = pendingText.indexOf(TOOL_END);
+                        if (endIdx !== -1) {
+                            // 工具调用结束，丢弃工具块内容
+                            pendingText = pendingText.substring(endIdx + TOOL_END.length);
+                            insideToolBlock = false;
+                            continue; // 继续检查后续内容
+                        }
+                        // TOOL_END 还没到，继续等待
+                        break;
+                    }
+                }
+            }
+
+            res.on('data', (chunk) => {
+                sseBuffer += chunk.toString();
+
+                // 按行解析 SSE
+                let lines = sseBuffer.split(/\r\n|\r|\n/);
+                sseBuffer = lines.pop(); // 最后一行可能不完整
+
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed || trimmed.startsWith(':')) continue; // 空行或注释
+
+                    if (trimmed.startsWith('data: ') || trimmed.startsWith('data:')) {
+                        const jsonStr = trimmed.startsWith('data: ')
+                            ? trimmed.substring(6).trim()
+                            : trimmed.substring(5).trim();
+
+                        if (jsonStr === '[DONE]') continue;
+
+                        try {
+                            const parsed = JSON.parse(jsonStr);
+                            const delta = parsed.choices?.[0]?.delta?.content;
+                            if (delta) {
+                                processContent(delta);
+                            }
+                        } catch (e) {
+                            // JSON 解析失败，跳过
+                        }
+                    }
+                }
+            });
+
+            res.on('end', () => {
+                // 处理 sseBuffer 中残余的数据
+                if (sseBuffer.trim()) {
+                    const trimmed = sseBuffer.trim();
+                    if (trimmed.startsWith('data: ') || trimmed.startsWith('data:')) {
+                        const jsonStr = trimmed.startsWith('data: ')
+                            ? trimmed.substring(6).trim()
+                            : trimmed.substring(5).trim();
+                        if (jsonStr !== '[DONE]') {
+                            try {
+                                const parsed = JSON.parse(jsonStr);
+                                const delta = parsed.choices?.[0]?.delta?.content;
+                                if (delta) processContent(delta);
+                            } catch (e) { }
+                        }
+                    }
+                }
+
+                // Flush 最后残余的文字段（不在工具块内的）
+                if (!insideToolBlock && pendingText.trim()) {
+                    flushSegment();
+                }
+
+                // 等待所有发送完成后 resolve
+                sendQueue.then(() => {
+                    if (!fullContent) {
+                        reject(new Error('VCP 流式响应为空：未收到任何内容'));
+                    } else {
+                        resolve(fullContent);
+                    }
+                }).catch(reject);
+            });
+
+            res.on('error', (err) => {
+                reject(err);
+            });
+        });
+
+        req.on('error', reject);
+        req.setTimeout(180000, () => {
+            req.destroy();
+            reject(new Error('VCP 流式请求超时（180秒）'));
+        });
+        req.write(body);
+        req.end();
+    });
 }
 
 /**
@@ -883,23 +1087,19 @@ async function handleDirectMessage(event) {
     ];
 
     try {
-        log('DEBUG', `调用 VCP，上下文 ${contextKey}，历史${historyMessages.length / 2}轮`);
-        const reply = await callVCP(messages);
-        const segments = sanitizeReply(reply);
-        contextManager.addRound(contextKey, cleanedText, reply);
+        log('DEBUG', `调用 VCP（流式），上下文 ${contextKey}，历史${historyMessages.length / 2}轮`);
 
-        if (segments.length === 0) {
-            log('WARN', 'VCP 回复清洗后为空，跳过发送');
-            return;
-        }
+        let segmentIndex = 0;
+        let hasContent = false;
 
-        // 逐段发送，第一段带引用，后续段独立发送
-        for (let i = 0; i < segments.length; i++) {
-            const truncated = truncateReply(segments[i]);
-            if (i === 0) {
+        const fullReply = await callVCPStreaming(messages, async (segment) => {
+            hasContent = true;
+            const truncated = truncateReply(segment);
+            if (segmentIndex === 0) {
+                // 第一段带引用
                 await sendReply(event, truncated);
             } else {
-                // 后续段：稍作延迟后独立发送（避免消息顺序错乱）
+                // 后续段：稍作延迟后独立发送
                 await sleep(500);
                 if (event.message_type === 'group') {
                     await sendGroupMessage(event.group_id, truncated);
@@ -910,7 +1110,15 @@ async function handleDirectMessage(event) {
                     });
                 }
             }
-            log('INFO', `回复 ${senderName}(${userId}) [${i + 1}/${segments.length}]: ${truncated.substring(0, 100)}`);
+            log('INFO', `回复 ${senderName}(${userId}) [段${segmentIndex + 1}]: ${truncated.substring(0, 100)}`);
+            segmentIndex++;
+        });
+
+        // 使用完整回复（含工具调用块）写入上下文，保证后续对话完整性
+        contextManager.addRound(contextKey, cleanedText, fullReply);
+
+        if (!hasContent) {
+            log('WARN', 'VCP 流式回复清洗后为空，跳过发送');
         }
     } catch (err) {
         log('ERROR', `处理消息失败:`, err.message);
@@ -959,19 +1167,20 @@ async function handleProactiveCheck(event) {
             }
         ];
 
-        const reply = await callVCP(messages);
-        const segments = sanitizeReply(reply);
-
-        if (segments.length === 0) {
-            log('WARN', '[主动发言] VCP 回复清洗后为空，跳过发送');
-            return;
-        }
-
-        for (let i = 0; i < segments.length; i++) {
-            const truncated = truncateReply(segments[i]);
-            if (i > 0) await sleep(500);
+        let proactiveHasContent = false;
+        let proactiveSegIdx = 0;
+        await callVCPStreaming(messages, async (segment) => {
+            proactiveHasContent = true;
+            const truncated = truncateReply(segment);
+            if (proactiveSegIdx > 0) await sleep(500);
             await sendGroupMessage(groupId, truncated);
-            log('INFO', `[主动发言] 在群 ${groupId} 发言 [${i + 1}/${segments.length}]: ${truncated.substring(0, 100)}`);
+            log('INFO', `[主动发言] 在群 ${groupId} 发言 [段${proactiveSegIdx + 1}]: ${truncated.substring(0, 100)}`);
+            proactiveSegIdx++;
+        });
+
+        if (!proactiveHasContent) {
+            log('WARN', '[主动发言] VCP 流式回复清洗后为空，跳过发送');
+            return;
         }
         groupBuffer.markSpoken(String(groupId));
 
