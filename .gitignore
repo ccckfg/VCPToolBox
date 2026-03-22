@@ -143,6 +143,7 @@ config.env
 config.env.local
 **/config.env
 !**/config.env.example
+!Plugin/QQRelay/config.env
 
 # 有 .example 对应的运行时配置
 ModelRedirect.json
