@@ -111,6 +111,25 @@ maid:「始」你的名字「末」, //该插件中这是必须字段
 keyword：「始」搜索关键词「末」, //多个关键词可以用英文逗号、中文逗号或空格分隔
 window_size：「始」匹配深度「末」 //非必须参数，可不填。可选5-20，默认10，数字越大返回的上下文结构化越多。
 
+4. QQ通讯插件 (QQRelay)
+用于给QQ好友发送私信，支持即时发送、定时发送以及查看好友列表。
+*发送私信:*
+tool_name:「始」QQRelay「末」,
+command:「始」SendMessage「末」,
+target:「始」(必需) 好友的昵称、备注或QQ号。「末」,
+message:「始」(必需) 要发送的消息内容。「末」
+
+*定时发送:*
+tool_name:「始」QQRelay「末」,
+command:「始」ScheduleMessage「末」,
+target:「始」(必需) 好友的昵称、备注或QQ号。「末」,
+message:「始」(必需) 要发送的消息内容。「末」,
+schedule_time:「始」(必需) 发送时间，格式 YYYY-MM-DD HH:mm。「末」
+
+*查看好友列表:*
+tool_name:「始」QQRelay「末」,
+command:「始」ListFriends「末」
+
 
 四. 其他工具
 

@@ -1,0 +1,13 @@
+{
+  "taskId": "qqrelay-1774220400000-vg3sl3",
+  "scheduledLocalTime": "2026-03-23T07:00:00+08:00",
+  "tool_call": {
+    "tool_name": "QQRelay",
+    "arguments": {
+      "command": "SendMessage",
+      "target": "Lumia_Kcy",
+      "message": "你好，Lumia_Kcy。ccckfg 让我提醒你，现在是早上 7:00，你今天有早八的课。请准时起床。"
+    }
+  },
+  "requestor": "Plugin: QQRelay"
+}
