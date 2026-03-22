@@ -5,9 +5,9 @@
     "reconnectInterval": 5000
   },
   "vcp": {
-    "apiUrl": "http://localhost:5890/v1/chat/completions",
-    "apiKey": "YOUR_VCP_KEY_HERE",
-    "model": "gemini-2.5-flash",
+    "apiUrl": "https://api.ccckfg.com/v1/chat/completions",
+    "apiKey": "VCPAccessKey2024",
+    "model": "gemini-3-flash-preview",
     "systemPrompt": "{{Connor}}"
   },
   "bot": {
@@ -25,7 +25,7 @@
     "proactive": {
       "enable": false,
       "groups": [],
-      "relevanceGateUrl": "http://localhost:5890/api/plugins/RelevanceGate/check",
+      "relevanceGateUrl": "http://localhost:6005/api/plugins/RelevanceGate/check",
       "relevanceToken": "",
       "threshold": 0.45,
       "searchK": 3,
