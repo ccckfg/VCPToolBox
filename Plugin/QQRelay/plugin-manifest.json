@@ -1,0 +1,36 @@
+{
+  "manifestVersion": "1.0.0",
+  "name": "QQRelay",
+  "version": "1.0.0",
+  "displayName": "QQ消息中继",
+  "description": "通过 napcat-vcp-bridge 向 QQ 好友发送即时或定时消息。",
+  "author": "VCPToolBox",
+  "pluginType": "synchronous",
+  "entryPoint": {
+    "type": "nodejs",
+    "command": "node QQRelay.js"
+  },
+  "communication": {
+    "protocol": "stdio",
+    "timeout": 15000
+  },
+  "capabilities": {
+    "invocationCommands": [
+      {
+        "commandIdentifier": "SendMessage",
+        "description": "立即给一个QQ好友发送私信。\n参数:\n- target (字符串, 必需): 好友的昵称、备注或QQ号。\n- message (字符串, 必需): 要发送的消息内容。\n调用格式:\n<<<[TOOL_REQUEST]>>>\ntool_name:「始」QQRelay「末」,\ncommand:「始」SendMessage「末」,\ntarget:「始」小明「末」,\nmessage:「始」你好，最近怎么样？「末」\n<<<[END_TOOL_REQUEST]>>>",
+        "example": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」QQRelay「末」,\ncommand:「始」SendMessage「末」,\ntarget:「始」小明「末」,\nmessage:「始」你好，最近怎么样？「末」\n<<<[END_TOOL_REQUEST]>>>"
+      },
+      {
+        "commandIdentifier": "ScheduleMessage",
+        "description": "定时给一个QQ好友发送私信。到预定时间后自动发送。\n参数:\n- target (字符串, 必需): 好友的昵称、备注或QQ号。\n- message (字符串, 必需): 要发送的消息内容。\n- schedule_time (字符串, 必需): 发送时间，格式 YYYY-MM-DD HH:mm。\n调用格式:\n<<<[TOOL_REQUEST]>>>\ntool_name:「始」QQRelay「末」,\ncommand:「始」ScheduleMessage「末」,\ntarget:「始」小明「末」,\nmessage:「始」早上好，该起床啦！「末」,\nschedule_time:「始」2026-03-22 08:00「末」\n<<<[END_TOOL_REQUEST]>>>",
+        "example": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」QQRelay「末」,\ncommand:「始」ScheduleMessage「末」,\ntarget:「始」小明「末」,\nmessage:「始」早上好，该起床啦！「末」,\nschedule_time:「始」2026-03-22 08:00「末」\n<<<[END_TOOL_REQUEST]>>>"
+      },
+      {
+        "commandIdentifier": "ListFriends",
+        "description": "查看当前QQ好友列表，了解可以给谁发消息。\n调用格式:\n<<<[TOOL_REQUEST]>>>\ntool_name:「始」QQRelay「末」,\ncommand:「始」ListFriends「末」\n<<<[END_TOOL_REQUEST]>>>",
+        "example": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」QQRelay「末」,\ncommand:「始」ListFriends「末」\n<<<[END_TOOL_REQUEST]>>>"
+      }
+    ]
+  }
+}
