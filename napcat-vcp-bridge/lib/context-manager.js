@@ -2,7 +2,9 @@ class ContextManager {
     constructor(options = {}) {
         this.maxRounds = options.maxRounds || 10;
         this.ttlMs = (options.ttlMinutes || 60) * 60 * 1000;
-        this.perUser = !!options.perUser;
+        const validScopes = new Set(['per_user', 'group_shared', 'global_shared']);
+        const legacyScope = options.perUser === false ? 'group_shared' : 'per_user';
+        this.scope = validScopes.has(options.scope) ? options.scope : legacyScope;
         this.log = options.log || (() => { });
         /** @type {Map<string, {messages: Array, lastAccess: number}>} */
         this.contexts = new Map();
@@ -12,10 +14,16 @@ class ContextManager {
     }
 
     getKey(userId, groupId) {
-        if (this.perUser) {
-            return groupId ? `g${groupId}_u${userId}` : `u${userId}`;
+        const uid = `u${userId}`;
+        const gid = groupId ? `g${groupId}` : null;
+
+        if (this.scope === 'global_shared') {
+            return 'global';
         }
-        return groupId ? `g${groupId}` : `u${userId}`;
+        if (this.scope === 'group_shared') {
+            return gid || uid;
+        }
+        return gid ? `${gid}_${uid}` : uid;
     }
 
     getMessages(key) {

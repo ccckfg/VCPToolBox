@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * NapCat ↔ VCPToolBox Bridge
- * v3.0: 情感感知 + 动态阈值 + 私聊主动发话（梦式调度）
+ * v3.1: VPE 私聊/群聊主动发言桥接入口
  */
 
 const path = require('path');
@@ -14,10 +14,16 @@ const { GroupMessageBuffer } = require('./lib/group-message-buffer');
 const { SentimentAnalyzer } = require('./lib/sentiment-analyzer');
 const { AffinityManager } = require('./lib/affinity-manager');
 const { VcpClient } = require('./lib/vcp-client');
-const { extractText, shouldTrigger, truncateReply, buildUserContent } = require('./lib/message-utils');
+const { shouldTrigger, truncateReply } = require('./lib/message-utils');
 const { FriendBook } = require('./lib/friend-book');
 const { createWebhookServer } = require('./lib/webhook-server');
 const { PrivateProactiveScheduler } = require('./lib/private-proactive-scheduler');
+const { createOneBotSender } = require('./lib/onebot-sender');
+const { createProactiveBootstrap } = require('./lib/proactive-bootstrap');
+const { createPrivateMessageHandler } = require('./lib/private-message-handler');
+const { createGroupMessageHandler } = require('./lib/group-message-handler');
+const { VpeStateStore } = require('./lib/vpe/state-store');
+const { VpeEngine } = require('./lib/vpe/engine');
 
 let appConfig;
 try {
@@ -28,78 +34,67 @@ try {
 }
 
 const { napcatConfig, vcpConfig, botConfig, proactiveConfig, webhookConfig } = appConfig;
+const privateProactiveConfig = botConfig.proactive?.private || {};
+const privateProactiveStrategy = ['legacy', 'vpe'].includes(String(privateProactiveConfig.strategy || '').toLowerCase())
+    ? String(privateProactiveConfig.strategy || '').toLowerCase()
+    : 'legacy';
+const vpePrivateConfig = privateProactiveConfig.vpe || {};
+const defaultEmbeddingModel = String(vpePrivateConfig.embeddingModel || process.env.WhitelistEmbeddingModel || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)[0] || '';
+const rawContextScope = String(botConfig.context?.scope || '').trim();
+const contextScopeByLegacy = botConfig.context?.perUser === false ? 'group_shared' : 'per_user';
+const contextScope = ['per_user', 'group_shared', 'global_shared'].includes(rawContextScope)
+    ? rawContextScope
+    : contextScopeByLegacy;
 
 const contextManager = new ContextManager({
     maxRounds: botConfig.context?.maxRounds || 8,
     ttlMinutes: botConfig.context?.ttlMinutes || 60,
-    perUser: !!botConfig.context?.perUser,
+    scope: contextScope,
     log
 });
 
 const groupBuffer = new GroupMessageBuffer(proactiveConfig);
-const sentimentAnalyzer = new SentimentAnalyzer();
-const affinityManager = new AffinityManager({
-    filePath: path.join(__dirname, 'affinity_data.json'),
-    sentimentAnalyzer,
-    log
-});
 const vcpClient = new VcpClient({
     vcpConfig,
     proactiveConfig,
+    log
+});
+const stateStore = new VpeStateStore({
+    filePath: path.join(__dirname, 'vpe_state.json'),
+    legacyFilePath: path.join(__dirname, 'affinity_data.json'),
+    log
+});
+const sentimentAnalyzer = new SentimentAnalyzer({
+    vcpClient,
+    embeddingModel: defaultEmbeddingModel,
+    anchorsPath: path.join(__dirname, 'data', 'emotion_anchors.json'),
+    log
+});
+sentimentAnalyzer.initialize().catch((err) => {
+    log('WARN', `[情绪] 初始化失败，继续使用词典模式: ${err.message}`);
+});
+const affinityManager = new AffinityManager({
+    stateStore,
+    sentimentAnalyzer,
     log
 });
 
 let ws = null;
 let selfId = null;
 let reconnectTimer = null;
-let actionEchoCounter = 0;
-const pendingActions = new Map();
 
-function callOneBot(action, params = {}) {
-    return new Promise((resolve, reject) => {
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-            reject(new Error('WebSocket 未连接'));
-            return;
-        }
-
-        const echo = `bridge_${++actionEchoCounter}`;
-        const timer = setTimeout(() => {
-            pendingActions.delete(echo);
-            reject(new Error(`OneBot action "${action}" 超时`));
-        }, 30000);
-
-        pendingActions.set(echo, { resolve, reject, timer });
-        ws.send(JSON.stringify({ action, params, echo }));
-    });
-}
-
-async function sendReply(event, text) {
-    const params = { message: [{ type: 'text', data: { text } }] };
-    if (event.message_type === 'group') {
-        params.group_id = event.group_id;
-        params.message.unshift({ type: 'reply', data: { id: String(event.message_id) } });
-        return callOneBot('send_group_msg', params);
-    }
-    params.user_id = event.user_id;
-    return callOneBot('send_private_msg', params);
-}
-
-async function sendGroupMessage(groupId, text) {
-    return callOneBot('send_group_msg', {
-        group_id: groupId,
-        message: [{ type: 'text', data: { text } }]
-    });
-}
-
+const sender = createOneBotSender({ log });
 const friendBook = new FriendBook({
-    callOneBot,
+    callOneBot: sender.callOneBot,
     log
 });
-
 const { startWebhookServer, stopWebhookServer } = createWebhookServer({
     webhookConfig,
     friendBook,
-    callOneBot,
+    callOneBot: sender.callOneBot,
     log
 });
 
@@ -109,147 +104,78 @@ const privateScheduler = new PrivateProactiveScheduler({
     contextManager,
     affinityManager,
     vcpClient,
-    callOneBot,
+    callOneBot: sender.callOneBot,
     truncateReply: (text) => truncateReply(text, botConfig.maxReplyLength || 3000),
     sleep,
     log
 });
-
-async function handleDirectMessage(event) {
-    const { shouldRespond, cleanedText } = shouldTrigger(event, selfId, botConfig.triggerMode);
-    if (!shouldRespond || !cleanedText) return;
-
-    const userId = event.user_id;
-    const groupId = event.group_id;
-    const senderName = event.sender?.nickname || event.sender?.card || String(userId);
-    const contextKey = contextManager.getKey(userId, groupId);
-
-    log('INFO', `收到消息 [${event.message_type}] ${senderName}(${userId}): ${cleanedText.substring(0, 100)}`);
-    affinityManager.onMessage(String(userId), cleanedText, senderName);
-
-    if (cleanedText === '/clear' || cleanedText === '清除记忆') {
-        contextManager.clear(contextKey);
-        try {
-            await sendReply(event, '✅ 对话记忆已清除');
-        } catch (err) {
-            log('ERROR', '发送清除确认失败:', err.message);
-        }
-        return;
-    }
-
-    const historyMessages = contextManager.getMessages(contextKey);
-    const messages = [
-        { role: 'system', content: vcpConfig.systemPrompt },
-        ...historyMessages,
-        { role: 'user', content: buildUserContent(event, cleanedText) }
-    ];
-
-    try {
-        log('DEBUG', `调用 VCP（流式），上下文 ${contextKey}，历史${historyMessages.length / 2}轮`);
-
-        let segmentIndex = 0;
-        let hasContent = false;
-        const fullReply = await vcpClient.callVCPStreaming(messages, async (segment) => {
-            hasContent = true;
-            const truncated = truncateReply(segment, botConfig.maxReplyLength || 3000);
-
-            if (segmentIndex === 0) {
-                await sendReply(event, truncated);
-            } else {
-                await sleep(500);
-                if (event.message_type === 'group') {
-                    await sendGroupMessage(event.group_id, truncated);
-                } else {
-                    await callOneBot('send_private_msg', {
-                        user_id: event.user_id,
-                        message: [{ type: 'text', data: { text: truncated } }]
-                    });
-                }
-            }
-
-            log('INFO', `回复 ${senderName}(${userId}) [段${segmentIndex + 1}]: ${truncated.substring(0, 100)}`);
-            segmentIndex++;
-        });
-
-        contextManager.addRound(contextKey, cleanedText, fullReply);
-
-        if (!hasContent) {
-            log('WARN', 'VCP 流式回复清洗后为空，跳过发送');
-        }
-    } catch (err) {
-        log('ERROR', '处理消息失败:', err.message);
-        try {
-            await sendReply(event, `⚠️ AI 处理失败：${err.message.substring(0, 200)}`);
-        } catch (sendErr) {
-            log('ERROR', '发送错误提示失败:', sendErr.message);
-        }
-    }
-}
-
-async function handleProactiveCheck(event) {
-    if (!proactiveConfig.enable) return;
-    if (event.message_type !== 'group') return;
-
-    const groupId = event.group_id;
-    if (!groupBuffer.isGroupEnabled(groupId)) return;
-
-    const rawText = extractText(event.message);
-    if (!rawText || rawText.length < 2) return;
-
-    const senderName = event.sender?.card || event.sender?.nickname || String(event.user_id);
-    affinityManager.onMessage(String(event.user_id), rawText, senderName);
-
-    const combinedText = groupBuffer.push(String(groupId), senderName, rawText);
-    if (!combinedText) return;
-
-    log('DEBUG', `[主动发言] 群 ${groupId} 触发相关度判定（${combinedText.length} 字符）`);
-
-    try {
-        const result = await vcpClient.checkRelevance(combinedText);
-        log('INFO', `[主动发言] 群 ${groupId} 相关度: ${result.score} (阈值: ${result.threshold}), 判定: ${result.relevant ? '发言' : '静默'}`);
-        if (!result.relevant) return;
-
-        const systemPrompt = proactiveConfig.systemPrompt || vcpConfig.systemPrompt;
-        const messages = [
-            { role: 'system', content: systemPrompt },
-            {
-                role: 'user',
-                content: `以下是一段QQ群聊记录，你觉得你可以参与讨论。请自然地加入对话，不要显得突兀：\n\n${combinedText}`
-            }
-        ];
-
-        let proactiveHasContent = false;
-        let proactiveSegIdx = 0;
-        await vcpClient.callVCPStreaming(messages, async (segment) => {
-            proactiveHasContent = true;
-            const truncated = truncateReply(segment, botConfig.maxReplyLength || 3000);
-            if (proactiveSegIdx > 0) await sleep(500);
-            await sendGroupMessage(groupId, truncated);
-            log('INFO', `[主动发言] 在群 ${groupId} 发言 [段${proactiveSegIdx + 1}]: ${truncated.substring(0, 100)}`);
-            proactiveSegIdx++;
-        });
-
-        if (!proactiveHasContent) {
-            log('WARN', '[主动发言] VCP 流式回复清洗后为空，跳过发送');
-            return;
-        }
-
-        groupBuffer.markSpoken(String(groupId));
-
-        if (result.tagBoostInfo?.matchedTags?.length > 0) {
-            log('DEBUG', `[主动发言] 匹配标签: ${result.tagBoostInfo.matchedTags.join(', ')}`);
-        }
-    } catch (err) {
-        log('ERROR', `[主动发言] 群 ${groupId} 处理失败:`, err.message);
-    }
-}
+const vpeEngine = new VpeEngine({
+    botConfig,
+    proactiveConfig,
+    privateConfig: privateProactiveConfig,
+    vpeConfig: {
+        ...proactiveConfig.vpe,
+        ...vpePrivateConfig,
+        embeddingModel: defaultEmbeddingModel
+    },
+    vcpConfig,
+    projectRoot: __dirname,
+    friendBook,
+    affinityManager,
+    stateStore,
+    vcpClient,
+    groupBuffer,
+    sendPrivateMessage: sender.sendPrivateMessage,
+    sendGroupMessage: sender.sendGroupMessage,
+    truncateReply: (text) => truncateReply(text, botConfig.maxReplyLength || 3000),
+    sleep,
+    log
+});
+const proactiveBootstrap = createProactiveBootstrap({
+    affinityManager,
+    privateScheduler,
+    privateStrategy: privateProactiveStrategy,
+    vpeEngine
+});
+const privateMessageHandler = createPrivateMessageHandler({
+    botConfig,
+    vcpConfig,
+    contextManager,
+    affinityManager,
+    vcpClient,
+    sender,
+    sleep,
+    log,
+    truncateReply: (text) => truncateReply(text, botConfig.maxReplyLength || 3000)
+});
+const groupMessageHandler = createGroupMessageHandler({
+    proactiveConfig,
+    botConfig,
+    vcpConfig,
+    groupBuffer,
+    affinityManager,
+    vcpClient,
+    vpeEngine,
+    sender,
+    sleep,
+    log,
+    truncateReply: (text) => truncateReply(text, botConfig.maxReplyLength || 3000)
+});
 
 async function handleMessage(event) {
-    const { shouldRespond } = shouldTrigger(event, selfId, botConfig.triggerMode);
+    if (event.message_type === 'private') {
+        await proactiveBootstrap.trackPrivateIncoming(event);
+    }
+
+    const { shouldRespond, cleanedText } = shouldTrigger(event, selfId, botConfig.triggerMode);
+    if (event.message_type === 'group') {
+        await groupMessageHandler.handleGroupMessage(event, {
+            allowLegacyProactive: !shouldRespond
+        });
+    }
+
     if (shouldRespond) {
-        await handleDirectMessage(event);
-    } else if (event.message_type === 'group') {
-        await handleProactiveCheck(event);
+        await privateMessageHandler.handleDirectMessage(event, cleanedText);
     }
 }
 
@@ -275,6 +201,7 @@ function connect() {
 
     log('INFO', `正在连接 NapCat WebSocket: ${napcatConfig.wsUrl}`);
     ws = new WebSocket(wsUrl);
+    sender.setSocket(ws);
 
     ws.on('open', () => {
         log('INFO', '✅ 已连接到 NapCat WebSocket');
@@ -283,7 +210,7 @@ function connect() {
             reconnectTimer = null;
         }
 
-        callOneBot('get_login_info')
+        sender.callOneBot('get_login_info')
             .then((res) => {
                 selfId = String(res.data?.user_id || '');
                 log('INFO', `Bot QQ号: ${selfId}, 昵称: ${res.data?.nickname || '未知'}`);
@@ -292,6 +219,7 @@ function connect() {
             .then(() => {
                 friendBook.startAutoRefresh();
                 startWebhookServer();
+                proactiveBootstrap.startPrivateProactiveEngine();
             })
             .catch((err) => {
                 log('WARN', '连接初始化失败:', err.message);
@@ -306,19 +234,7 @@ function connect() {
             return;
         }
 
-        if (data.echo) {
-            const pending = pendingActions.get(data.echo);
-            if (pending) {
-                clearTimeout(pending.timer);
-                pendingActions.delete(data.echo);
-                if (data.status === 'ok' || data.retcode === 0) {
-                    pending.resolve(data);
-                } else {
-                    pending.reject(new Error(`OneBot error: ${data.wording || data.msg || JSON.stringify(data)}`));
-                }
-            }
-            return;
-        }
+        if (sender.handleEcho(data)) return;
 
         if (data.post_type === 'message') {
             if (String(data.user_id) === selfId) return;
@@ -347,11 +263,17 @@ function printBanner() {
         ? `开启 (阈值: ${proactiveConfig.threshold || 0.45})`
         : '关闭';
     const privateStatus = botConfig.proactive?.private?.enable
-        ? `开启 (白名单: ${(botConfig.proactive.private.whitelist || []).length}人)`
+        ? `开启 (${privateProactiveStrategy}, ${(botConfig.proactive.private.whitelist || []).length}人)`
         : '关闭';
+    const contextScopeLabelMap = {
+        per_user: '按用户',
+        group_shared: '按群共享(私聊按用户)',
+        global_shared: '全局共享'
+    };
+    const contextScopeLabel = contextScopeLabelMap[contextScope] || contextScope;
     console.log(`
 ╔══════════════════════════════════════════╗
-║     NapCat ↔ VCPToolBox Bridge v3.0     ║
+║     NapCat ↔ VCPToolBox Bridge v3.1     ║
 ╠══════════════════════════════════════════╣
 ║  NapCat WS : ${String(napcatConfig.wsUrl || '').padEnd(27)}║
 ║  VCP API   : ${String(vcpConfig.apiUrl || '').substring(0, 27).padEnd(27)}║
@@ -359,6 +281,7 @@ function printBanner() {
 ║  私聊触发   : ${String(botConfig.triggerMode?.private || 'all').padEnd(26)}║
 ║  群聊触发   : ${String(botConfig.triggerMode?.group || 'atOrPrefix').padEnd(26)}║
 ║  上下文轮数 : ${String(botConfig.context?.maxRounds || 8).padEnd(26)}║
+║  上下文作用域 : ${String(contextScopeLabel).padEnd(24)}║
 ║  群聊主动   : ${proactiveStatus.padEnd(26)}║
 ║  私聊主动   : ${privateStatus.padEnd(26)}║
 ║  Webhook    : ${(webhookConfig.enable ? `开启 (端口: ${webhookConfig.port || 3005})` : '关闭').padEnd(26)}║
@@ -370,16 +293,18 @@ function printBanner() {
 function shutdown(signal) {
     log('INFO', `收到 ${signal}，正在关闭...`);
     privateScheduler.stop();
+    vpeEngine.stop();
     contextManager.shutdown();
     affinityManager.shutdown();
+    friendBook.stop();
     stopWebhookServer();
+    sender.shutdown();
     if (ws) ws.close();
     process.exit(0);
 }
 
 printBanner();
 connect();
-privateScheduler.start();
 
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));

@@ -1,0 +1,26 @@
+{
+  "manifestVersion": "1.0.0",
+  "name": "UserScheduleBriefing",
+  "version": "1.0.0",
+  "displayName": "用户专属日程简报",
+  "description": "每小时清理过期日程并生成带用户归属标识的日程简报，防止跨用户提醒混淆。",
+  "author": "VCPToolBox",
+  "pluginType": "static",
+  "entryPoint": {
+    "type": "nodejs",
+    "command": "node UserScheduleBriefing.js"
+  },
+  "refreshIntervalCron": "0 * * * *",
+  "communication": {
+    "protocol": "stdio",
+    "timeout": 10000
+  },
+  "capabilities": {
+    "systemPromptPlaceholders": [
+      {
+        "placeholder": "VCPUserSchedule",
+        "description": "显示所有用户的待办日程安排（带归属标识和防混淆指令）。"
+      }
+    ]
+  }
+}

@@ -151,6 +151,7 @@ dailynote/
 ip_blacklist.json
 /VectorStore
 napcat-vcp-bridge/affinity_data.json
+napcat-vcp-bridge/vpe_state.json
 
 # 插件缓存文件
 Plugin/ArtistMatcher/artist_cache.json

@@ -81,12 +81,19 @@ function truncateReply(text, maxReplyLength = 3000) {
 }
 
 function buildUserContent(event, text) {
-    const senderName = event.sender?.card || event.sender?.nickname || String(event.user_id);
+    const userId = String(event.user_id ?? '');
+    const nickname = event.sender?.nickname || '';
+    const card = event.sender?.card || '';
+    const senderName = card || nickname || userId;
+    const identityParts = [];
+    if (card) identityParts.push(`群名片:${card}`);
+    if (nickname && nickname !== card) identityParts.push(`昵称:${nickname}`);
+    const identitySuffix = identityParts.length > 0 ? ` | 身份:${identityParts.join(' / ')}` : '';
 
     if (event.message_type === 'group') {
-        return `[群聊 | 群号:${event.group_id} | 发言者:${senderName}] ${text}`;
+        return `[群聊 | 群号:${event.group_id} | 发言者:${senderName} | QQ:${userId}${identitySuffix}] ${text}`;
     }
-    return `[私聊 | 对方:${senderName}] ${text}`;
+    return `[私聊 | 对方:${senderName} | QQ:${userId}${identitySuffix}] ${text}`;
 }
 
 module.exports = {

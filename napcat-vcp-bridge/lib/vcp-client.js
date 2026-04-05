@@ -15,6 +15,48 @@ class VcpClient {
         this.vcpConfig = options.vcpConfig || {};
         this.proactiveConfig = options.proactiveConfig || {};
         this.log = options.log || (() => { });
+        this._embeddingCache = new Map();
+        this._embeddingCacheLimit = Math.max(32, Number(options.embeddingCacheLimit) || 256);
+    }
+
+    getEmbeddingCacheKey(text, model) {
+        return `${String(model || '')}:${String(text || '')}`;
+    }
+
+    getCachedEmbedding(text, model) {
+        const key = this.getEmbeddingCacheKey(text, model);
+        if (!this._embeddingCache.has(key)) return null;
+        const value = this._embeddingCache.get(key);
+        this._embeddingCache.delete(key);
+        this._embeddingCache.set(key, value);
+        return value;
+    }
+
+    setCachedEmbedding(text, model, vector) {
+        if (!Array.isArray(vector) || !vector.length) return;
+        const key = this.getEmbeddingCacheKey(text, model);
+        if (this._embeddingCache.has(key)) {
+            this._embeddingCache.delete(key);
+        }
+        this._embeddingCache.set(key, vector);
+        while (this._embeddingCache.size > this._embeddingCacheLimit) {
+            const firstKey = this._embeddingCache.keys().next().value;
+            this._embeddingCache.delete(firstKey);
+        }
+    }
+
+    invalidateEmbeddingCache(modelPrefix = '') {
+        if (!modelPrefix) {
+            this._embeddingCache.clear();
+            return;
+        }
+
+        const prefix = `${String(modelPrefix)}:`;
+        for (const key of this._embeddingCache.keys()) {
+            if (key.startsWith(prefix)) {
+                this._embeddingCache.delete(key);
+            }
+        }
     }
 
     httpRequest(url, method, headers, body) {
@@ -77,6 +119,93 @@ class VcpClient {
             throw new Error('VCP 响应格式异常：无 choices[0].message.content');
         }
         return reply;
+    }
+
+    getEmbeddingsUrl() {
+        const urlObj = new URL(this.vcpConfig.apiUrl);
+        if (urlObj.pathname.endsWith('/chat/completions')) {
+            urlObj.pathname = urlObj.pathname.replace(/\/chat\/completions$/, '/embeddings');
+        } else {
+            urlObj.pathname = '/v1/embeddings';
+        }
+        urlObj.search = '';
+        return urlObj.toString();
+    }
+
+    async getEmbeddings(input, model) {
+        const normalizedInput = (Array.isArray(input) ? input : [input])
+            .map((item) => String(item ?? '').trim());
+        if (!normalizedInput.length) return [];
+
+        const cached = new Array(normalizedInput.length).fill(null);
+        const pendingInputs = [];
+        const pendingIndexes = [];
+
+        normalizedInput.forEach((text, index) => {
+            const hit = this.getCachedEmbedding(text, model);
+            if (hit) {
+                cached[index] = hit;
+                return;
+            }
+            pendingInputs.push(text);
+            pendingIndexes.push(index);
+        });
+
+        if (!pendingInputs.length) {
+            return cached;
+        }
+
+        const body = JSON.stringify({
+            model,
+            input: pendingInputs
+        });
+
+        const res = await this.httpRequest(
+            this.getEmbeddingsUrl(),
+            'POST',
+            {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${this.vcpConfig.apiKey}`,
+                'Content-Length': Buffer.byteLength(body)
+            },
+            body
+        );
+
+        if (res.status !== 200) {
+            throw new Error(`Embeddings 返回 HTTP ${res.status}: ${res.body.substring(0, 500)}`);
+        }
+
+        const json = JSON.parse(res.body);
+        const data = Array.isArray(json.data) ? json.data : [];
+        const fetched = new Map();
+        data.forEach((item, index) => {
+            const inputIndex = Number.isInteger(item?.index) ? item.index : index;
+            if (Array.isArray(item?.embedding) && item.embedding.length > 0) {
+                fetched.set(inputIndex, item.embedding);
+            }
+        });
+
+        pendingIndexes.forEach((originalIndex, requestIndex) => {
+            const vector = fetched.get(requestIndex);
+            if (!Array.isArray(vector) || !vector.length) {
+                throw new Error(`Embeddings 响应缺少第 ${requestIndex} 条向量`);
+            }
+            cached[originalIndex] = vector;
+            this.setCachedEmbedding(normalizedInput[originalIndex], model, vector);
+        });
+
+        return cached;
+    }
+
+    async getEmbedding(input, model) {
+        const normalizedInput = String(input ?? '').trim();
+        if (!normalizedInput) return null;
+
+        const cached = this.getCachedEmbedding(normalizedInput, model);
+        if (cached) return cached;
+
+        const embeddings = await this.getEmbeddings([normalizedInput], model);
+        return embeddings[0] || null;
     }
 
     callVCPStreaming(messages, onSegment) {
@@ -239,16 +368,20 @@ class VcpClient {
     }
 
     async checkRelevance(text) {
-        if (!this.proactiveConfig.enable) return { relevant: false, score: 0 };
+        return this.checkRelevanceWithOptions(text, {});
+    }
 
-        const gateUrl = this.proactiveConfig.relevanceGateUrl
+    async checkRelevanceWithOptions(text, options = {}) {
+        const gateUrl = options.gateUrl
+            || this.proactiveConfig.relevanceGateUrl
             || `http://localhost:${process.env.VCP_PORT || 5890}/api/plugins/RelevanceGate/check`;
 
         const body = JSON.stringify({
             text,
-            threshold: this.proactiveConfig.threshold || 0.45,
-            k: this.proactiveConfig.searchK || 3,
-            tag_boost: this.proactiveConfig.tagBoost || 0.5
+            threshold: options.threshold ?? this.proactiveConfig.threshold ?? 0.45,
+            k: options.k ?? this.proactiveConfig.searchK ?? 3,
+            tag_boost: options.tagBoost ?? this.proactiveConfig.tagBoost ?? 0.5,
+            diary_name: options.diaryName || ''
         });
 
         const headers = {
@@ -256,8 +389,9 @@ class VcpClient {
             'Content-Length': Buffer.byteLength(body)
         };
 
-        if (this.proactiveConfig.relevanceToken) {
-            headers.Authorization = `Bearer ${this.proactiveConfig.relevanceToken}`;
+        const relevanceToken = options.relevanceToken ?? this.proactiveConfig.relevanceToken;
+        if (relevanceToken) {
+            headers.Authorization = `Bearer ${relevanceToken}`;
         }
 
         try {
@@ -270,6 +404,44 @@ class VcpClient {
         } catch (err) {
             this.log('WARN', `RelevanceGate 调用失败: ${err.message}`);
             return { relevant: false, score: 0 };
+        }
+    }
+
+    async getSemanticScore(eventText, userId, diaryName = '', options = {}) {
+        const baseUrl = options.gateUrl
+            || this.proactiveConfig?.vpe?.semanticQueryGateUrl
+            || this.proactiveConfig?.semanticQueryGateUrl
+            || `http://localhost:${process.env.VCP_PORT || 5890}/api/plugins/SemanticQueryGate`;
+
+        const gateUrl = baseUrl.endsWith('/match') ? baseUrl : `${baseUrl.replace(/\/$/, '')}/match`;
+        const body = JSON.stringify({
+            event_text: eventText,
+            user_id: String(userId || ''),
+            diary_name: diaryName || ''
+        });
+        const headers = {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body)
+        };
+        const token = options.token
+            || this.proactiveConfig?.vpe?.semanticQueryGateToken
+            || this.proactiveConfig?.semanticQueryGateToken;
+        if (token) {
+            headers.Authorization = `Bearer ${token}`;
+        }
+
+        try {
+            const res = await this.httpRequest(gateUrl, 'POST', headers, body);
+            if (res.status !== 200) {
+                this.log('WARN', `SemanticQueryGate 返回 HTTP ${res.status}`);
+                return null;
+            }
+            const parsed = JSON.parse(res.body);
+            const semanticScore = Number(parsed?.semantic_score);
+            return Number.isFinite(semanticScore) ? semanticScore : null;
+        } catch (err) {
+            this.log('WARN', `SemanticQueryGate 调用失败: ${err.message}`);
+            return null;
         }
     }
 }

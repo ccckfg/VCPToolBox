@@ -1,86 +1,181 @@
-const fs = require('fs');
+const {
+    AFFINITY_DECAY_LAMBDA,
+    BASE_AFFINITY,
+    FATIGUE_DECAY_GAMMA,
+    GHOSTING_WINDOW_MS
+} = require('./vpe/constants');
+const { clamp, toLocalDateString } = require('./vpe/utils');
 
 class AffinityManager {
     constructor(options = {}) {
-        this.filePath = options.filePath;
+        this.stateStore = options.stateStore;
         this.sentimentAnalyzer = options.sentimentAnalyzer;
-        this.log = options.log || (() => { });
-        /** @type {Map<string, {affinity: number, lastMessageTime: number, lastProactiveTime: number, messageCount: number, nickname: string, dailyProactiveCount: number, dailyResetDate: string}>} */
+        this.log = options.log || (() => {});
         this.users = new Map();
-        this._load();
 
-        this._recoveryTimer = setInterval(() => this._naturalRecovery(), 60 * 60 * 1000);
-        if (this._recoveryTimer.unref) this._recoveryTimer.unref();
-    }
-
-    _load() {
-        try {
-            if (this.filePath && fs.existsSync(this.filePath)) {
-                const data = JSON.parse(fs.readFileSync(this.filePath, 'utf-8'));
-                if (data && typeof data === 'object') {
-                    for (const [uid, info] of Object.entries(data)) {
-                        this.users.set(uid, info);
-                    }
-                }
-                this.log('INFO', `[亲和度] 已加载 ${this.users.size} 个用户的亲和度数据`);
-            }
-        } catch (err) {
-            this.log('WARN', `[亲和度] 加载失败: ${err.message}`);
+        for (const { userId, ...user } of this.stateStore.getAllUsers()) {
+            this.users.set(userId, user);
         }
+
+        this._maintenanceTimer = setInterval(() => {
+            this.sweepGhostingPenalties();
+            this.stateStore.maybeRunGc();
+            this._refreshUserMap();
+        }, 10 * 60 * 1000);
+        if (this._maintenanceTimer.unref) this._maintenanceTimer.unref();
     }
 
-    _save() {
-        if (!this.filePath) return;
-        try {
-            const obj = {};
-            for (const [uid, info] of this.users) {
-                obj[uid] = info;
-            }
-            fs.writeFileSync(this.filePath, JSON.stringify(obj, null, 2), 'utf-8');
-        } catch (err) {
-            this.log('ERROR', `[亲和度] 持久化失败: ${err.message}`);
+    _refreshUserMap() {
+        this.users.clear();
+        for (const { userId, ...user } of this.stateStore.getAllUsers()) {
+            this.users.set(userId, user);
         }
     }
 
     _getOrCreate(userId, nickname = '') {
-        if (!this.users.has(userId)) {
-            this.users.set(userId, {
-                affinity: 50,
-                lastMessageTime: 0,
-                lastProactiveTime: 0,
-                messageCount: 0,
-                nickname,
-                dailyProactiveCount: 0,
-                dailyResetDate: new Date().toISOString().slice(0, 10)
-            });
-        }
-        const user = this.users.get(userId);
-        if (nickname && nickname !== user.nickname) {
-            user.nickname = nickname;
-        }
+        const user = this.stateStore.getUser(userId, nickname);
+        this._attachLegacyAliases(user);
+        this.users.set(String(userId), user);
         return user;
     }
 
-    onMessage(userId, text, nickname = '') {
-        const user = this._getOrCreate(userId, nickname);
-        user.lastMessageTime = Date.now();
-        user.messageCount++;
-        user.affinity = Math.min(100, user.affinity + 0.5);
+    _attachLegacyAliases(user) {
+        if (!user || user.__legacyAliasesAttached) return;
 
-        const sentimentScore = this.sentimentAnalyzer ? this.sentimentAnalyzer.analyze(text) : 0;
-        if (sentimentScore !== 0) {
-            user.affinity = Math.max(0, Math.min(100, user.affinity + sentimentScore));
-            this.log(
-                'DEBUG',
-                `[亲和度] ${nickname}(${userId}) 情绪${sentimentScore > 0 ? '积极' : '消极'} (${sentimentScore > 0 ? '+' : ''}${sentimentScore})，当前亲和度: ${user.affinity.toFixed(1)}`
-            );
+        Object.defineProperties(user, {
+            lastProactiveTime: {
+                get() {
+                    return this.lastProactiveMs;
+                },
+                enumerable: false,
+                configurable: true
+            },
+            lastMessageTime: {
+                get() {
+                    return this.lastMsgMs;
+                },
+                enumerable: false,
+                configurable: true
+            },
+            __legacyAliasesAttached: {
+                value: true,
+                enumerable: false,
+                configurable: true
+            }
+        });
+    }
+
+    _applyDecay(user, now = Date.now()) {
+        const anchor = Number(user.lastCalcTime) || Number(user.lastMsgMs) || now;
+        const deltaHours = (now - anchor) / (60 * 60 * 1000);
+        if (deltaHours <= 0.5) return;
+
+        user.affinity = BASE_AFFINITY + ((user.affinity - BASE_AFFINITY) * Math.exp(-AFFINITY_DECAY_LAMBDA * deltaHours));
+        user.lastCalcTime = now;
+    }
+
+    getDecayedFatigue(user, now = Date.now()) {
+        if (!user?.lastProactiveMs || !user?.fatigue) return 0;
+        const deltaHours = Math.max(0, (now - user.lastProactiveMs) / (60 * 60 * 1000));
+        return user.fatigue * Math.exp(-FATIGUE_DECAY_GAMMA * deltaHours);
+    }
+
+    async onMessage(userId, text, nickname = '', options = {}) {
+        const user = this._getOrCreate(userId, nickname);
+        const now = Date.now();
+
+        this._applyDecay(user, now);
+
+        if (options.isPrivate && user.pendingReplySince && now - user.pendingReplySince <= GHOSTING_WINDOW_MS) {
+            this.onIceBreak(userId, now, false);
         }
 
-        this._save();
+        const sentimentScore = this.sentimentAnalyzer ? await this.sentimentAnalyzer.analyze(text) : 0;
+        const softCap = Math.max(0.1, 1 - (user.affinity / 100));
+        const delta = (0.5 + sentimentScore) * softCap;
+
+        user.affinity = clamp(user.affinity + delta, 0, 100);
+        user.lastMsgMs = now;
+        user.lastCalcTime = now;
+        user.messageCount = Number(user.messageCount) + 1;
+
+        this.stateStore.save();
+        this.users.set(String(userId), user);
+
+        this.log(
+            'DEBUG',
+            `[亲和度] ${nickname || user.nickname || userId}(${userId}) 情绪分=${sentimentScore.toFixed(3)} 变化=${delta.toFixed(3)} 当前=${user.affinity.toFixed(2)}`
+        );
+
+        return user;
+    }
+
+    onIceBreak(userId, now = Date.now(), persist = true) {
+        const user = this._getOrCreate(userId);
+        this._applyDecay(user, now);
+        user.affinity = clamp(user.affinity + 2.0, 0, 100);
+        user.fatigue = 0;
+        user.pendingReplySince = 0;
+        user.lastCalcTime = now;
+        if (persist) this.stateStore.save();
+        this.log('INFO', `[亲和度] ${user.nickname || userId} 在主动发话后回应，已触发破冰奖励`);
+        return user;
+    }
+
+    onProactiveSent(userId, category = 'schedule', now = Date.now()) {
+        const user = this._getOrCreate(userId);
+        this._applyDecay(user, now);
+        const currentFatigue = this.getDecayedFatigue(user, now);
+        user.fatigue = currentFatigue + 0.30;
+        user.lastProactiveMs = now;
+        user.pendingReplySince = now;
+
+        const today = toLocalDateString(new Date(now));
+        if (user.dailyResetDate !== today) {
+            user.dailyResetDate = today;
+            user.dailyProactiveCount = 0;
+        }
+        user.dailyProactiveCount = Number(user.dailyProactiveCount) + 1;
+
+        user.ucb = user.ucb || { total: 0, cats: {} };
+        user.ucb.total = Number(user.ucb.total) + 1;
+        user.ucb.cats = user.ucb.cats || {};
+        user.ucb.cats[category] = Number(user.ucb.cats[category] || 0) + 1;
+
+        user.lastCalcTime = now;
+        this.stateStore.save();
+        return user;
+    }
+
+    sweepGhostingPenalties(now = Date.now()) {
+        let changed = false;
+        for (const { userId, ...snapshot } of this.stateStore.getAllUsers()) {
+            const user = this.stateStore.getUser(userId);
+            if (!user.pendingReplySince || now - user.pendingReplySince < GHOSTING_WINDOW_MS) {
+                continue;
+            }
+
+            this._applyDecay(user, now);
+            const penalty = 1 + (0.04 * Math.max(0, user.affinity - BASE_AFFINITY));
+            user.affinity = clamp(user.affinity - penalty, 0, 100);
+            user.pendingReplySince = 0;
+            user.lastCalcTime = now;
+            changed = true;
+            this.log('INFO', `[亲和度] ${user.nickname || userId} 超时未回复主动发话，扣除 ${penalty.toFixed(2)} 亲和度`);
+        }
+
+        if (changed) {
+            this.stateStore.save();
+            this._refreshUserMap();
+        }
     }
 
     getAffinity(userId) {
-        return this.users.get(userId)?.affinity ?? 50;
+        return this._getOrCreate(userId).affinity ?? BASE_AFFINITY;
+    }
+
+    getUserState(userId, nickname = '') {
+        return this._getOrCreate(userId, nickname);
     }
 
     getProactiveProbability(userId) {
@@ -98,56 +193,42 @@ class AffinityManager {
     }
 
     markProactive(userId) {
+        return this.onProactiveSent(userId, 'legacy');
+    }
+
+    canProactiveToday(userId, maxDaily, now = Date.now()) {
         const user = this._getOrCreate(userId);
-        user.lastProactiveTime = Date.now();
-
-        const today = new Date().toISOString().slice(0, 10);
+        const today = toLocalDateString(new Date(now));
         if (user.dailyResetDate !== today) {
-            user.dailyProactiveCount = 0;
             user.dailyResetDate = today;
+            user.dailyProactiveCount = 0;
+            this.stateStore.save();
+            return true;
         }
-        user.dailyProactiveCount++;
-
-        this._save();
+        return Number(user.dailyProactiveCount) < maxDaily;
     }
 
-    canProactiveToday(userId, maxDaily) {
-        const user = this.users.get(userId);
-        if (!user) return true;
-        const today = new Date().toISOString().slice(0, 10);
-        if (user.dailyResetDate !== today) return true;
-        return user.dailyProactiveCount < maxDaily;
+    recordPrivateHistory(userId, role, content, timestamp = Date.now()) {
+        this.stateStore.recordPrivateHistory(userId, role, content, timestamp);
+        this._refreshUserMap();
     }
 
-    _naturalRecovery() {
-        let changed = false;
-        for (const user of this.users.values()) {
-            if (user.affinity < 50) {
-                user.affinity = Math.min(50, user.affinity + 1);
-                changed = true;
-            }
-        }
-        if (changed) {
-            this._save();
-            this.log('DEBUG', '[亲和度] 自然恢复已执行');
-        }
+    getPrivateHistory(userId, maxMessages = 4) {
+        return this.stateStore.getPrivateHistory(userId, maxMessages);
+    }
+
+    clearPrivateHistory(userId) {
+        this.stateStore.clearPrivateHistory(userId);
+        this._refreshUserMap();
     }
 
     getEligibleUsers(whitelist) {
-        const result = [];
-        for (const uid of whitelist) {
-            const uidStr = String(uid);
-            const user = this.users.get(uidStr);
-            if (user) {
-                result.push({ userId: uidStr, ...user });
-            }
-        }
-        return result;
+        return this.stateStore.getUsersByIds(whitelist);
     }
 
     shutdown() {
-        if (this._recoveryTimer) clearInterval(this._recoveryTimer);
-        this._save();
+        if (this._maintenanceTimer) clearInterval(this._maintenanceTimer);
+        this.stateStore.save();
     }
 }
 

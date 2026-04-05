@@ -18,7 +18,8 @@
     },
     "context": {
       "maxRounds": 20,
-      "perUser": true,
+      "scope": "global_shared",
+      "perUser": false,
       "ttlMinutes": 60
     },
     "maxReplyLength": 3000,
@@ -35,15 +36,30 @@
       "cooldownSeconds": 300,
       "minCheckIntervalSeconds": 30,
       "systemPrompt": "{{Connor}}\n你正在旁听一个QQ群聊。以下是最近的群聊内容，你发现这个话题与你的知识相关。请自然地加入对话，发表你的见解，但不要显得突兀或强行插话。如果对话中出现重要信息，记得调用 DailyNote 记录。",
+      "vpe": {
+        "groups": [],
+        "semanticQueryGateUrl": "http://localhost:5890/api/plugins/SemanticQueryGate",
+        "semanticQueryGateToken": "",
+        "sensorUrl": "http://localhost:5890/api/plugins/SensorAggregator",
+        "sensorToken": ""
+      },
       "private": {
         "enable": true,
+        "strategy": "vpe",
         "whitelist": [1413161276,3086310277],
         "checkIntervalMinutes": 30,
         "timeWindowStart": 8,
         "timeWindowEnd": 24,
         "cooldownHours": 4,
         "maxDailyMessages": 2,
-        "systemPrompt": "{{Connor}}\n你是一个有感情的AI助手。你想主动找用户聊天，分享你最近发现的有趣事情或关心一下对方。保持自然和真诚，不要机械化。"
+        "systemPrompt": "{{Connor}}\n你是一个有感情的AI助手。你想主动找用户聊天，分享你最近发现的有趣事情或关心一下对方。保持自然和真诚，不要机械化。",
+        "vpe": {
+          "tickMinutes": 10,
+          "dryRun": true,
+          "embeddingModel": "",
+          "legacyScheduleTargetUserId": "",
+          "diaryMap": {}
+        }
       }
     },
     "webhook": {

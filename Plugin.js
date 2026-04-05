@@ -586,6 +586,17 @@ class PluginManager {
                         }
                     }
 
+                    if (manifest.name === 'SemanticQueryGate') {
+                        const ragPluginModule = this.messagePreprocessors.get('RAGDiaryPlugin');
+                        if (ragPluginModule && typeof ragPluginModule.getSingleEmbedding === 'function') {
+                            dependencies.ragPlugin = ragPluginModule;
+                            dependencies.getSingleEmbedding = ragPluginModule.getSingleEmbedding.bind(ragPluginModule);
+                            if (this.debugMode) console.log(`[PluginManager] Injected ragPlugin (with semanticGroups) and getSingleEmbedding into SemanticQueryGate.`);
+                        } else {
+                            console.warn(`[PluginManager] RAGDiaryPlugin not available for SemanticQueryGate injection. SemanticQueryGate will be limited.`);
+                        }
+                    }
+
                     // --- ConnorLED 依赖注入 ---
                     if (manifest.name === 'ConnorLED') {
                         const ragPluginModule = this.messagePreprocessors.get('RAGDiaryPlugin');

@@ -1,0 +1,36 @@
+{
+  "manifestVersion": "1.0.0",
+  "name": "UserSchedule",
+  "version": "1.0.0",
+  "displayName": "用户专属日程管理器",
+  "description": "带用户归属标识的日程管理工具。每条日程必须绑定目标用户，防止跨用户混淆。优先使用本插件代替旧版ScheduleManager。",
+  "author": "VCPToolBox",
+  "pluginType": "synchronous",
+  "entryPoint": {
+    "type": "nodejs",
+    "command": "node UserSchedule.js"
+  },
+  "communication": {
+    "protocol": "stdio",
+    "timeout": 5000
+  },
+  "capabilities": {
+    "invocationCommands": [
+      {
+        "commandIdentifier": "AddSchedule",
+        "description": "为指定用户添加一个新的日程。\n参数：\n- target_user (字符串, 必需): 该日程归属的目标用户（填写对方的昵称、备注或QQ号），系统将据此区分不同用户的日程，防止提醒错人。\n- time (字符串, 必需): 日程时间，格式 YYYY-MM-DD HH:mm。\n- content (字符串, 必需): 日程内容。\n调用格式：\n<<<[TOOL_REQUEST]>>>\ntool_name:「始」UserSchedule「末」,\ncommand:「始」AddSchedule「末」,\ntarget_user:「始」zzzkfg「末」,\ntime:「始」2025-12-31 10:00「末」,\ncontent:「始」准备跨年晚会「末」\n<<<[END_TOOL_REQUEST]>>>",
+        "example": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」UserSchedule「末」,\ncommand:「始」AddSchedule「末」,\ntarget_user:「始」zzzkfg「末」,\ntime:「始」2025-12-31 10:00「末」,\ncontent:「始」准备跨年晚会「末」\n<<<[END_TOOL_REQUEST]>>>"
+      },
+      {
+        "commandIdentifier": "DeleteSchedule",
+        "description": "删除指定的日程。\n参数：\n- id (字符串, 必需): 要删除的日程ID。\n调用格式：\n<<<[TOOL_REQUEST]>>>\ntool_name:「始」UserSchedule「末」,\ncommand:「始」DeleteSchedule「末」,\nid:「始」1735564800000「末」\n<<<[END_TOOL_REQUEST]>>>",
+        "example": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」UserSchedule「末」,\ncommand:「始」DeleteSchedule「末」,\nid:「始」1735564800000「末」\n<<<[END_TOOL_REQUEST]>>>"
+      },
+      {
+        "commandIdentifier": "ListSchedules",
+        "description": "查看所有用户的日程列表，每条日程会标注归属用户。\n调用格式：\n<<<[TOOL_REQUEST]>>>\ntool_name:「始」UserSchedule「末」,\ncommand:「始」ListSchedules「末」\n<<<[END_TOOL_REQUEST]>>>",
+        "example": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」UserSchedule「末」,\ncommand:「始」ListSchedules「末」\n<<<[END_TOOL_REQUEST]>>>"
+      }
+    ]
+  }
+}

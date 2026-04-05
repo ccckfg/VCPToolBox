@@ -1,0 +1,26 @@
+{
+  "manifestVersion": "1.0.0",
+  "name": "SemanticQueryGate",
+  "version": "1.0.0",
+  "displayName": "语义查询网关 (SemanticQueryGate)",
+  "description": "为 VPE 提供事件文本与用户语义记忆的匹配分数。",
+  "author": "VCP",
+  "pluginType": "service",
+  "hasApiRoutes": true,
+  "entryPoint": {
+    "script": "SemanticQueryGate.js"
+  },
+  "communication": {
+    "protocol": "direct"
+  },
+  "configSchema": {
+    "SEMANTIC_QUERY_GATE_TOKEN": {
+      "type": "string",
+      "description": "访问 SemanticQueryGate API 的认证令牌。留空则不需要认证。",
+      "default": ""
+    }
+  },
+  "capabilities": {
+    "invocationCommands": []
+  }
+}

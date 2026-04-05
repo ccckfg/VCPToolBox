@@ -79,7 +79,10 @@ class PrivateProactiveScheduler {
                     continue;
                 }
 
-                const lastContact = Math.max(user.lastProactiveTime, user.lastMessageTime);
+                const lastContact = Math.max(
+                    user.lastProactiveMs ?? user.lastProactiveTime ?? 0,
+                    user.lastMsgMs ?? user.lastMessageTime ?? 0
+                );
                 if (nowMs - lastContact < cooldownMs) {
                     this.log('DEBUG', `[主动私聊] ${user.nickname || userId} 冷却中，跳过`);
                     continue;
@@ -99,11 +102,12 @@ class PrivateProactiveScheduler {
 
                 this.log('INFO', `[主动私聊] ${user.nickname || userId} 掷骰子命中! 生成问候...`);
 
-                const contextKey = `u${userId}`;
+                const contextKey = this.contextManager.getKey(userId, null);
                 const history = this.contextManager.getMessages(contextKey);
                 const systemPrompt = privateConfig.systemPrompt || this.vcpConfig.systemPrompt;
+                const identityClarification = `\n\n[身份隔离指令] 你当前正在主动找 ${user.nickname || userId} 聊天。对话历史中可能混有你与其他用户的记忆。严禁将其他用户交代你的事情（如提醒、日程、任务、约定）错误地传达给 ${user.nickname || userId}。只聊与对方相关的内容。`;
                 const messages = [
-                    { role: 'system', content: systemPrompt },
+                    { role: 'system', content: systemPrompt + identityClarification },
                     ...history.slice(-4),
                     {
                         role: 'user',
@@ -113,8 +117,10 @@ class PrivateProactiveScheduler {
 
                 try {
                     let segIdx = 0;
-                    await this.vcpClient.callVCPStreaming(messages, async (segment) => {
+                    const visibleSegments = [];
+                    const fullReply = await this.vcpClient.callVCPStreaming(messages, async (segment) => {
                         const truncated = this.truncateReply(segment);
+                        visibleSegments.push(truncated);
                         if (segIdx > 0) await this.sleep(500);
                         await this.callOneBot('send_private_msg', {
                             user_id: Number(userId),
@@ -123,7 +129,13 @@ class PrivateProactiveScheduler {
                         segIdx++;
                     });
 
-                    this.affinityManager.markProactive(userId);
+                    this.affinityManager.onProactiveSent(userId, 'legacy');
+                    this.affinityManager.recordPrivateHistory(
+                        userId,
+                        'assistant',
+                        visibleSegments.length > 0 ? visibleSegments.join('\n') : fullReply,
+                        Date.now()
+                    );
                     this.log('INFO', `[主动私聊] ✅ 已主动发消息给 ${user.nickname || userId}（亲和度: ${user.affinity.toFixed(1)}）`);
                 } catch (err) {
                     this.log('ERROR', `[主动私聊] 发送给 ${userId} 失败:`, err.message);

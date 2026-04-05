@@ -1,0 +1,36 @@
+{
+  "manifestVersion": "1.0.0",
+  "name": "SensorAggregator",
+  "version": "1.0.0",
+  "displayName": "传感器聚合器 (SensorAggregator)",
+  "description": "聚合天气和热点缓存，为 VPE Bridge 提供公共事件。",
+  "author": "VCP",
+  "pluginType": "service",
+  "hasApiRoutes": true,
+  "entryPoint": {
+    "script": "SensorAggregator.js"
+  },
+  "communication": {
+    "protocol": "direct"
+  },
+  "configSchema": {
+    "SENSOR_TOKEN": {
+      "type": "string",
+      "description": "访问 SensorAggregator API 的认证令牌。留空则不需要认证。",
+      "default": ""
+    },
+    "DEFAULT_CITY": {
+      "type": "string",
+      "description": "天气事件中使用的默认城市名称。",
+      "default": "Shanghai"
+    },
+    "NEWS_LIMIT": {
+      "type": "number",
+      "description": "每次返回的热点条目数量。",
+      "default": 3
+    }
+  },
+  "capabilities": {
+    "invocationCommands": []
+  }
+}
