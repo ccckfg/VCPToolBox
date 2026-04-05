@@ -46,7 +46,7 @@
       "private": {
         "enable": true,
         "strategy": "vpe",
-        "whitelist": [1413161276,3086310277],
+        "whitelist": [1413161276,3086310277,3067086816,862144261],
         "checkIntervalMinutes": 30,
         "timeWindowStart": 8,
         "timeWindowEnd": 24,
