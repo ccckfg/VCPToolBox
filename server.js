@@ -548,6 +548,11 @@ app.use((req, res, next) => {
         return next();
     }
 
+    // Skip bearer token check for plugin API routes (plugins handle their own auth)
+    if (req.path.startsWith('/api/plugins/')) {
+        return next();
+    }
+
     const authHeader = req.headers.authorization;
     if (!authHeader || authHeader !== `Bearer ${serverKey}`) {
         return res.status(401).json({ error: 'Unauthorized (Bearer token required)' });
