@@ -38,9 +38,9 @@
       "systemPrompt": "{{Connor}}\n你正在旁听一个QQ群聊。以下是最近的群聊内容，你发现这个话题与你的知识相关。请自然地加入对话，发表你的见解，但不要显得突兀或强行插话。如果对话中出现重要信息，记得调用 DailyNote 记录。",
       "vpe": {
         "groups": [],
-        "semanticQueryGateUrl": "http://localhost:5890/api/plugins/SemanticQueryGate",
+        "semanticQueryGateUrl": "http://localhost:6005/api/plugins/SemanticQueryGate",
         "semanticQueryGateToken": "",
-        "sensorUrl": "http://localhost:5890/api/plugins/SensorAggregator",
+        "sensorUrl": "http://localhost:6005/api/plugins/SensorAggregator",
         "sensorToken": ""
       },
       "private": {
